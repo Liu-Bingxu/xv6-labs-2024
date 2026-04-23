@@ -1,0 +1,15 @@
+Looking at the backtrace output, which function called syscall?
+usertrap()
+What is the value of p->trapframe->a7 and what does that value represent? (Hint: look user/initcode.S, the first user program xv6 starts.)
+a7的值为0x7，这个值代表exec的系统调用号
+What was the previous mode that the CPU was in?
+sstatus为0x200000022，上一个特权级为user mode，因为SPP为0
+Write down the assembly instruction the kernel is panicing at. Which register corresponds to the variable num?
+80001c20:	00002683          	lw	a3,0(zero) # 0 <_entry-0x80000000>
+Why does the kernel crash?
+因为内核页表上的地址0未映射，所以发生了load页异常
+What is the name of the process that was running when the kernel paniced? What is its process id (pid)?
+(gdb) p cpus[1].proc.name 
+$4 = "initcode\000\000\000\000\000\000\000"
+(gdb) p cpus[1].proc.pid 
+$5 = 1
