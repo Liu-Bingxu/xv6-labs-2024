@@ -27,4 +27,5 @@ va 0x3FFFFE000 pte 0x21FD08C7 pa 0x87F42000 perm 0xC7
 va 0x3FFFFF000 pte 0x2000184B pa 0x80006000 perm 0x4B
 将虚拟地址0x3FFFFF000开始的4KB映射到物理地址0x80006000开始的4KB，标志位为存在，可读，可执行，内核态，可访问（load）
 
-
+Which other xv6 system call(s) could be made faster using this shared page? Explain how.
+其他的都不行，因为其他的都是一个过程，重要的是过程本身而不是结果，fstat和read勉强可以
