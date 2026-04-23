@@ -488,9 +488,42 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 
 
 #ifdef LAB_PGTBL
-void
-vmprint(pagetable_t pagetable) {
-  // your code here
+void vmprint_4K(uint64 base_addr_i, pagetable_t pagetable) {
+    for(int i = 0; i < 512; i++){
+        pte_t pte = pagetable[i];
+        uint64 base_addr = base_addr_i + ((uint64)i * PGSIZE);
+        if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) != 0){
+            printf(" .. .. ..%p: pte %p pa %p\n", (void *)base_addr, (void *)pte, (void *)PTE2PA(pte));
+        } else if(pte & PTE_V){
+            printf(" .. .. ..%p: pte %p pa %p error\n", (void *)base_addr, (void *)pte, (void *)PTE2PA(pte));
+        }
+    }
+}
+void vmprint_2M(uint64 base_addr_i, pagetable_t pagetable) {
+    for(int i = 0; i < 512; i++){
+        pte_t pte = pagetable[i];
+        uint64 base_addr = base_addr_i + ((uint64)i * PGSIZE * 512);
+        if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+            printf(" .. ..%p: pte %p pa %p\n", (void *)base_addr, (void *)pte, (void *)PTE2PA(pte));
+            vmprint_4K(base_addr, (pagetable_t)PTE2PA(pte));
+        } else if(pte & PTE_V){
+            printf(" .. ..%p: pte %p pa %p superpage 2M\n", (void *)base_addr, (void *)pte, (void *)PTE2PA(pte));
+        }
+    }
+}
+void vmprint(pagetable_t pagetable) {
+    printf("page table %p\n", pagetable);
+    for(int i = 0; i < 512; i++){
+        pte_t pte = pagetable[i];
+        uint64 base_addr = ((uint64)i * PGSIZE * 512 * 512);
+        base_addr = (base_addr >> 38) ? (base_addr | (~((MAXVA << 1) - 1))) : base_addr;
+        if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+            printf(" ..%p: pte %p pa %p\n", (void *)base_addr, (void *)pte, (void *)PTE2PA(pte));
+            vmprint_2M(base_addr, (pagetable_t)PTE2PA(pte));
+        } else if(pte & PTE_V){
+            printf(" ..%p: pte %p pa %p superpage 1G\n", (void *)base_addr, (void *)pte, (void *)PTE2PA(pte));
+        }
+    }
 }
 #endif
 

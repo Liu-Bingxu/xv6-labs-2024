@@ -29,3 +29,25 @@ va 0x3FFFFF000 pte 0x2000184B pa 0x80006000 perm 0x4B
 
 Which other xv6 system call(s) could be made faster using this shared page? Explain how.
 其他的都不行，因为其他的都是一个过程，重要的是过程本身而不是结果，fstat和read勉强可以
+
+For every leaf page in the vmprint output, explain what it logically contains and what its permission bits are, and how it relates to the output of the earlier print_pgtbl() exercise above.
+page table 0x0000000087f22000
+ ..0x0000000000000000: pte 0x0000000021fc7801 pa 0x0000000087f1e000
+ .. ..0x0000000000000000: pte 0x0000000021fc7401 pa 0x0000000087f1d000
+ .. .. ..0x0000000000000000: pte 0x0000000021fc7c5b pa 0x0000000087f1f000
+包含text段和rodata段，对应之前相同虚拟地址，将虚拟地址0开始的4KB映射到物理地址0x87f1f000开始的4KB，标志位为存在，可读，可执行，用户态，可访问（load）
+ .. .. ..0x0000000000001000: pte 0x0000000021fc70d7 pa 0x0000000087f1c000
+包含data段和bss段，对应之前相同虚拟地址，将虚拟地址0x1000开始的4KB映射到物理地址0x87f1c000开始的4KB，标志位为存在，可读，可写，用户态，可访问（load），已脏
+ .. .. ..0x0000000000002000: pte 0x0000000021fc6c07 pa 0x0000000087f1b000
+包含保护页，对应之前相同虚拟地址，将虚拟地址0x2000开始的4KB映射到物理地址0x87f1b000开始的4KB，标志位为存在，可读，可写，内核态
+ .. .. ..0x0000000000003000: pte 0x0000000021fc68d7 pa 0x0000000087f1a000
+包含用户栈，对应之前相同虚拟地址，将虚拟地址0x3000开始的4KB映射到物理地址0x87f1a000开始的4KB，标志位为存在，可读，可写，用户态，可访问（load），已脏
+ ..0x0000003fc0000000: pte 0x0000000021fc8401 pa 0x0000000087f21000
+ .. ..0x0000003fffe00000: pte 0x0000000021fc8001 pa 0x0000000087f20000
+ .. .. ..0x0000003fffffd000: pte 0x0000000021fd4c13 pa 0x0000000087f53000
+包含usyscall，之前没有，因为是之间加的，将虚拟地址0x3FFFFD000开始的4KB映射到物理地址0x87f53000开始的4KB，标志位为存在，可读，用户态
+ .. .. ..0x0000003fffffe000: pte 0x0000000021fd00c7 pa 0x0000000087f40000
+包含trapframe，对应之前相同虚拟地址，将虚拟地址0x3FFFFE000开始的4KB映射到物理地址0x87f40000开始的4KB，标志位为存在，可读，可写，内核态，可访问（load），已脏
+ .. .. ..0x0000003ffffff000: pte 0x000000002000184b pa 0x0000000080006000
+包含trampoline，对应之前相同虚拟地址，将虚拟地址0x3FFFFF000开始的4KB映射到物理地址0x80006000开始的4KB，标志位为存在，可读，可执行，内核态，可访问（load）
+
