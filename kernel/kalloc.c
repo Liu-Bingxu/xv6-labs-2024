@@ -21,6 +21,7 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
+  struct run *superfreelist;
 } kmem;
 
 void
@@ -35,8 +36,59 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
+
+    char *np = (char *)SUPERPGROUNDUP((uint64)pa_start);
+    if(np != p){
+        for(; p + PGSIZE <= (char*)np; p += PGSIZE)
+            kfree(p);
+    }
+    #define SUPERPAGE_NUM_PREPEAR 32
+    for(uint i = 0; i < SUPERPAGE_NUM_PREPEAR; i++, p += SUPERPGSIZE){
+        if(p + SUPERPGSIZE <= (char*)pa_end)
+            superfree(p);
+        else
+            panic("no need super page");
+    }
   for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
     kfree(p);
+}
+
+// Free the page of physical memory pointed at by pa,
+// which normally should have been returned by a
+// call to kalloc().  (The exception is when
+// initializing the allocator; see kinit above.)
+void superfree(void *pa){
+    struct run *r;
+
+    if(((uint64)pa % SUPERPGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+        panic("superfree");
+
+    // Fill with junk to catch dangling refs.
+    memset(pa, 1, SUPERPGSIZE);
+
+    r = (struct run*)pa;
+
+    acquire(&kmem.lock);
+    r->next = kmem.superfreelist;
+    kmem.superfreelist = r;
+    release(&kmem.lock);
+}
+
+// Allocate one 4096-byte page of physical memory.
+// Returns a pointer that the kernel can use.
+// Returns 0 if the memory cannot be allocated.
+void *superalloc(void){
+  struct run *r;
+
+    acquire(&kmem.lock);
+    r = kmem.superfreelist;
+    if(r)
+        kmem.superfreelist = r->next;
+    release(&kmem.lock);
+
+    if(r)
+        memset((char*)r, 5, SUPERPGSIZE); // fill with junk
+    return (void*)r;
 }
 
 // Free the page of physical memory pointed at by pa,
