@@ -73,12 +73,19 @@ usertrap(void)
     setkilled(p);
   }
 
-  if(killed(p))
-    exit(-1);
+    if(killed(p)){
+        exit(-1);
+    }
 
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
+    // give up the CPU if this is a timer interrupt.
+    if(which_dev == 2){
+        struct proc *p = myproc();
+        p->now_tisck++;
+        if(p->now_tisck == p->next_tisck){
+            sigalarm();
+        }
+        yield();
+    }
 
   usertrapret();
 }
@@ -150,9 +157,15 @@ kerneltrap()
     panic("kerneltrap");
   }
 
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2 && myproc() != 0)
-    yield();
+    // give up the CPU if this is a timer interrupt.
+    if(which_dev == 2 && myproc() != 0){
+        struct proc *p = myproc();
+        p->now_tisck++;
+        if(p->now_tisck == p->next_tisck){
+            sigalarm();
+        }
+        yield();
+    }
 
   // the yield() may have caused some traps to occur,
   // so restore trap registers for use by kernelvec.S's sepc instruction.

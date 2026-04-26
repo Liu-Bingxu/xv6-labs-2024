@@ -93,3 +93,40 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+void sigalarm(void){
+    struct proc * p = myproc();
+    *p->sig_trapframe = *p->trapframe;
+    p->trapframe->epc = p->sig_handle;
+    p->trapframe->sp = TRAPFRAME;
+}
+
+uint64 sys_sigalarm(void){
+    int ticks0;
+    uint64 handle;
+
+    argint(0, &ticks0);
+    argaddr(1, &handle);
+
+    struct proc * p = myproc();
+
+    if((ticks0 == 0) && (handle == 0)){
+        p->tisck = 0;
+        p->next_tisck = 0;
+        p->sig_handle = 0;
+    }else if(ticks0 < 0){
+        printf("sys_sigalarm param error ticks0 is %d < 0\n", ticks0);
+        return -1;
+    }else{
+        p->tisck = ticks0;
+        p->next_tisck = p->now_tisck + ticks0;
+        p->sig_handle = handle;
+    }
+    return 0;
+}
+uint64 sys_sigreturn(void){
+    struct proc * p = myproc();
+    *p->trapframe = *p->sig_trapframe;
+    p->next_tisck = p->now_tisck + p->tisck;
+    return p->trapframe->a0;
+}

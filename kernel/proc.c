@@ -132,6 +132,20 @@ found:
     return 0;
   }
 
+    // Allocate a sig trapframe page.
+    if((p->sig_trapframe = (struct trapframe *)kalloc()) == 0){
+        freeproc(p);
+        release(&p->lock);
+        return 0;
+    }
+
+    // Allocate a sig stack page.
+    if((p->sigstack = kalloc()) == 0){
+        freeproc(p);
+        release(&p->lock);
+        return 0;
+    }
+
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -139,6 +153,10 @@ found:
     release(&p->lock);
     return 0;
   }
+
+    p->now_tisck = 0;
+    p->next_tisck = 0;
+    p->sig_handle = 0;
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -158,6 +176,12 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+    if(p->sig_trapframe)
+        kfree((void*)p->sig_trapframe);
+    p->sig_trapframe = 0;
+    if(p->sigstack)
+        kfree(p->sigstack);
+    p->sigstack = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -202,6 +226,16 @@ proc_pagetable(struct proc *p)
     return 0;
   }
 
+    // map the sig handle stack 
+    // at the highest user virtual address.
+    if(mappages(pagetable, SIGSTACK, PGSIZE,
+                (uint64)(p->sigstack), PTE_R | PTE_W | PTE_U) < 0){
+        uvmunmap(pagetable, TRAPFRAME, 1, 0);
+        uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+        uvmfree(pagetable, 0);
+        return 0;
+    }
+
   return pagetable;
 }
 
@@ -210,6 +244,7 @@ proc_pagetable(struct proc *p)
 void
 proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
+    uvmunmap(pagetable, SIGSTACK, 1, 0);
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
   uvmfree(pagetable, sz);
