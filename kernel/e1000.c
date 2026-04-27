@@ -19,6 +19,49 @@ static char *rx_bufs[RX_RING_SIZE];
 static volatile uint32 *regs;
 
 struct spinlock e1000_lock;
+static uint64 send_unuse = TX_RING_SIZE;
+// static uint64 send_un_cnt = 0;
+// static uint64 send_lc_cnt = 0;
+// static uint64 send_ec_cnt = 0;
+// static uint64 send_dd_cnt = 0;
+// static uint64 recv_unuse = RX_RING_SIZE;
+static struct proc *enetproc;
+
+static void enet_napi_sched(void){
+    release(&myproc()->lock);
+    while(1){
+        intr_on();
+    }
+}
+
+static struct proc* allocproc(void){
+    struct proc *p;
+    extern struct proc proc[NPROC];
+
+    for(p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        if(p->state == UNUSED) {
+            goto found;
+        } else {
+            release(&p->lock);
+        }
+    }
+    panic("enet no proc");
+
+found:
+    p->pid = allocpid();
+    p->state = USED;
+
+    if((p->trapframe = (struct trapframe *)kalloc()) == 0){
+        panic("enet proc alloc page fail");
+    }
+
+    memset(&p->context, 0, sizeof(p->context));
+    p->context.ra = (uint64)enet_napi_sched;
+    p->context.sp = (uint64)p->trapframe + PGSIZE;
+
+    return p;
+}
 
 // called by pci_init().
 // xregs is the memory address at which the
@@ -89,6 +132,15 @@ e1000_init(uint32 *xregs)
   regs[E1000_RDTR] = 0; // interrupt after every received packet (no timer)
   regs[E1000_RADV] = 0; // interrupt after every packet (no timer)
   regs[E1000_IMS] = (1 << 7); // RXDW -- Receiver Descriptor Write Back
+
+    struct proc *p;
+    p = allocproc();
+    enetproc = p;
+
+    safestrcpy(p->name, "enet_napi_proc", sizeof(p->name));
+    p->cwd = namei("/");
+    p->state = SLEEPING;
+    release(&p->lock);
 }
 
 int
@@ -102,8 +154,22 @@ e1000_transmit(char *buf, int len)
   // a pointer so that it can be freed after send completes.
   //
 
-  
-  return 0;
+    acquire(&e1000_lock);
+    while(1){
+        if(send_unuse == 0){
+            sleep(&send_unuse, &e1000_lock);
+        }else{
+            tx_ring[regs[E1000_TDT]].addr = (uint64)buf;
+            tx_ring[regs[E1000_TDT]].length = (len > 48) ? len : 48;
+            tx_ring[regs[E1000_TDT]].cmd = 0x8B;
+            regs[E1000_TDT] = ((regs[E1000_TDT] + 1) % TX_RING_SIZE);
+            send_unuse--;
+            break;
+        }
+    }
+    release(&e1000_lock);
+
+    return 0;
 }
 
 static void
@@ -125,6 +191,15 @@ e1000_intr(void)
   // without this the e1000 won't raise any
   // further interrupts.
   regs[E1000_ICR] = 0xffffffff;
+  regs[E1000_IMS] = 0; // redisable interrupts
+
+    acquire(&enetproc->lock);
+    if(enetproc->state == SLEEPING) {
+        enetproc->state = RUNNABLE;
+    }else{
+        panic("napi proc no sleep but enet intr happen");
+    }
+    release(&enetproc->lock);
 
   e1000_recv();
 }

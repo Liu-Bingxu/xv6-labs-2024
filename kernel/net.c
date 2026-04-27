@@ -173,6 +173,13 @@ sys_send(void)
     printf("send: copyin failed\n");
     return -1;
   }
+    uint16 ttl = ip->ip_ttl;
+    uint16 ipsum = ip->ip_sum;
+    ip->ip_ttl = 0;
+    ip->ip_sum = udp->ulen;
+    udp->sum = in_cksum((unsigned char *)&(ip->ip_ttl), 20 + len);
+    ip->ip_ttl = ttl;
+    ip->ip_sum = ipsum;
 
   e1000_transmit(buf, total);
 
