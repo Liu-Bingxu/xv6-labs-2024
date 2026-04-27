@@ -315,7 +315,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+    page_acquire_lock();
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -324,17 +324,19 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    if(mappages(new, i, PGSIZE, pa, flags & (~PTE_W)) != 0){
       goto err;
     }
+    if((page_get_ref(pa) == 1) && (page_get_save(pa) == 0))
+        page_save(pa, flags & PTE_W);
+    page_get(pa);
+    *pte = *pte & (~PTE_W);
   }
+    page_release_lock();
   return 0;
 
  err:
+    page_release_lock();
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
 }
@@ -366,8 +368,15 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     if(va0 >= MAXVA)
       return -1;
     pte = walk(pagetable, va0, 0);
-    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
-       (*pte & PTE_W) == 0)
+    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+      return -1;
+    if(va0 == TRAMPOLINE)
+      return -1;
+    if(((*pte & PTE_W) == 0) && (page_get_save(PTE2PA(*pte)) != 0)){
+        struct proc *p = myproc();
+        mem_write_page_trap(p, va0);
+    }
+    if((*pte & PTE_W) == 0)
       return -1;
     pa0 = PTE2PA(*pte);
     n = PGSIZE - (dstva - va0);

@@ -63,6 +63,12 @@ void            ramdiskrw(struct buf*);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
+void            page_acquire_lock(void);
+void            page_release_lock(void);
+void            page_save(uint64, uint);
+uint8           page_get_save(uint64);
+uint8           page_get_ref(uint64);
+void            page_get(uint64);
 
 // log.c
 void            initlog(int, struct superblock*);
@@ -147,6 +153,7 @@ void            trapinit(void);
 void            trapinithart(void);
 extern struct spinlock tickslock;
 void            usertrapret(void);
+void            mem_write_page_trap(struct proc *, uint64);
 
 // uart.c
 void            uartinit(void);

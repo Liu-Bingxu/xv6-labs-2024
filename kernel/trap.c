@@ -29,6 +29,64 @@ trapinithart(void)
   w_stvec((uint64)kernelvec);
 }
 
+void mem_write_page_trap(struct proc *p, uint64 trap_addr){
+    pte_t *pte;
+    uint64 pa;
+    uint flags;
+    void *mem;
+    trap_addr = PGROUNDDOWN(trap_addr);
+    page_acquire_lock();
+    if(trap_addr >= MAXVA){
+        printf("mem_write_page_trap: %p big than MAXVA\n", (void *)trap_addr);
+        goto err;
+    }
+    if((pte = walk(p->pagetable, trap_addr, 0)) == 0){
+        printf("mem_write_page_trap: %p pte should exist\n", (void *)trap_addr);
+        goto err;
+    }
+    if((*pte & PTE_V) == 0){
+        printf("mem_write_page_trap: %p page not present\n", (void *)trap_addr);
+        goto err;
+    }
+    pa = PTE2PA(*pte);
+    flags = PTE_FLAGS(*pte);
+    if(trap_addr == TRAMPOLINE){
+        printf("mem_write_page_trap: %p page is tramoline\n", (void *)trap_addr);
+        goto err;
+    }
+    uint8 save = page_get_save(pa);
+    if(save == 0){
+        printf("mem_write_page_trap: %p page couldn't write\n", (void *)trap_addr);
+        goto err;
+    }
+    if(page_get_ref(pa) == 1){
+        *pte = 0;
+        if(mappages(p->pagetable, trap_addr, PGSIZE, (uint64)pa, flags | PTE_W) != 0){
+            printf("mem_write_page_trap: page couldn't map%d\n", __LINE__);
+            goto err;
+        }
+        page_release_lock();
+        return;
+    }
+    mem = kalloc();
+    if(mem == 0){
+        printf("mem_write_page_trap: page couldn't alloc\n");
+        goto err;
+    }
+    memmove(mem, (char*)pa, PGSIZE);
+    *pte = 0;
+    kfree((void *)pa);
+    if(mappages(p->pagetable, trap_addr, PGSIZE, (uint64)mem, flags | PTE_W) != 0){
+        printf("mem_write_page_trap: page couldn't map\n");
+        goto err;
+    }
+    page_release_lock();
+    return;
+err:
+    page_release_lock();
+    exit(-1);
+}
+
 //
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
@@ -65,6 +123,16 @@ usertrap(void)
     intr_on();
 
     syscall();
+  }else if(r_scause() == 15){
+    if(killed(p))
+        exit(-1);
+    uint64 trap_addr = r_stval();
+
+    // an interrupt will change sepc, scause, and sstatus,
+    // so enable only now that we're done with those registers.
+    intr_on();
+
+    mem_write_page_trap(p, trap_addr);
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
