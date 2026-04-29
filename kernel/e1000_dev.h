@@ -7,6 +7,7 @@
 #define E1000_CTL      (0x00000/4)  /* Device Control Register - RW */
 #define E1000_ICR      (0x000C0/4)  /* Interrupt Cause Read - R */
 #define E1000_IMS      (0x000D0/4)  /* Interrupt Mask Set - RW */
+#define E1000_IMC      (0x000D8/4)  /* Interrupt Mask Clear - W */
 #define E1000_RCTL     (0x00100/4)  /* RX Control - RW */
 #define E1000_TCTL     (0x00400/4)  /* TX Control - RW */
 #define E1000_TIPG     (0x00410/4)  /* TX Inter-packet gap -RW */
