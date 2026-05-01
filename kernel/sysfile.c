@@ -242,9 +242,43 @@ bad:
   return -1;
 }
 
-static struct inode*
-create(char *path, short type, short major, short minor)
+static struct inode* link_search(char *path, uint8 stack_deep)
 {
+link_search_start:
+  struct inode *ip, *dp;
+  char name[DIRSIZ];
+
+  if((dp = nameiparent(path, name)) == 0)
+    return 0;
+
+  ilock(dp);
+
+  if((ip = dirlookup(dp, name, 0)) != 0){
+    iunlockput(dp);
+    ilock(ip);
+    if(ip->type == T_FILE || ip->type == T_DEVICE)
+      return ip;
+    if(ip->type == T_SYMLINK){
+      int ret = readi(ip, 0, (uint64)path, 0, MAXPATH);
+      if(ret == MAXPATH){
+        iunlockput(ip);
+        if(stack_deep == 10)
+            return (struct inode*)-1;
+        stack_deep++;
+        goto link_search_start;
+      }
+    }
+    iunlockput(ip);
+    return 0;
+  }
+  iunlockput(dp);
+  return 0;
+}
+
+static struct inode*
+create(char *path, short type, short major, short minor, int no_follow_link, uint8 stack_deep)
+{
+create_start:
   struct inode *ip, *dp;
   char name[DIRSIZ];
 
@@ -258,6 +292,18 @@ create(char *path, short type, short major, short minor)
     ilock(ip);
     if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
       return ip;
+    if(type == T_FILE && (ip->type == T_SYMLINK) & no_follow_link)
+      return ip;
+    if(type == T_FILE && (ip->type == T_SYMLINK)){
+      int ret = readi(ip, 0, (uint64)path, 0, MAXPATH);
+      if(ret == MAXPATH){
+        iunlockput(ip);
+        if(stack_deep == 10)
+            return (struct inode*)-1;
+        stack_deep++;
+        goto create_start;
+      }
+    }
     iunlockput(ip);
     return 0;
   }
@@ -317,10 +363,14 @@ sys_open(void)
   begin_op();
 
   if(omode & O_CREATE){
-    ip = create(path, T_FILE, 0, 0);
+    ip = create(path, T_FILE, 0, 0, (omode & O_NOFOLLOW), 0);
     if(ip == 0){
       end_op();
       return -1;
+    }else if((uint64)ip == -1){
+      // symbol link too many
+      end_op();
+      return -2;
     }
   } else {
     if((ip = namei(path)) == 0){
@@ -332,6 +382,23 @@ sys_open(void)
       iunlockput(ip);
       end_op();
       return -1;
+    }else if(ip->type == T_SYMLINK && (!(omode & O_NOFOLLOW))){
+      int ret = readi(ip, 0, (uint64)path, 0, MAXPATH);
+      if(ret != MAXPATH){
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      iunlockput(ip);
+      ip = link_search(path, 1);
+      if(ip == 0){
+        end_op();
+        return -1;
+      }else if((uint64)ip == -1){
+        // symbol link too many
+        end_op();
+        return -2;
+      }
     }
   }
 
@@ -377,7 +444,7 @@ sys_mkdir(void)
   struct inode *ip;
 
   begin_op();
-  if(argstr(0, path, MAXPATH) < 0 || (ip = create(path, T_DIR, 0, 0)) == 0){
+  if(argstr(0, path, MAXPATH) < 0 || (ip = create(path, T_DIR, 0, 0, 0, 0)) == 0){
     end_op();
     return -1;
   }
@@ -397,7 +464,7 @@ sys_mknod(void)
   argint(1, &major);
   argint(2, &minor);
   if((argstr(0, path, MAXPATH)) < 0 ||
-     (ip = create(path, T_DEVICE, major, minor)) == 0){
+     (ip = create(path, T_DEVICE, major, minor, 0, 0)) == 0){
     end_op();
     return -1;
   }
@@ -502,4 +569,66 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+uint64 sys_symlink(void){
+    char target[MAXPATH];
+    char path[MAXPATH];
+    int n;
+    struct inode *path_ip, *path_dp;
+    char name[DIRSIZ];
+
+    if((n = argstr(0, target, MAXPATH)) < 0)
+        return -1;
+    if((n = argstr(1, path, MAXPATH)) < 0)
+        return -1;
+
+    begin_op();
+
+    if((path_dp = nameiparent(path, name)) == 0){
+        // path parent not exist
+        end_op();
+        return -1;
+    }
+    ilock(path_dp);
+
+    if((path_ip = dirlookup(path_dp, name, 0)) != 0){
+        // if path exist
+        goto bad_path;
+    }
+
+    if((path_ip = ialloc(path_dp->dev, FD_SYMLINK)) == 0){
+        goto bad_path;
+    }
+
+    ilock(path_ip);
+    path_ip->major = 0;
+    path_ip->minor = 0;
+    path_ip->nlink = 1;
+    iupdate(path_ip);
+
+    if(dirlink(path_dp, name, path_ip->inum) < 0)
+        goto fail;
+
+    if (writei(path_ip, 0, (uint64)target, 0, MAXPATH) != MAXPATH){
+        goto fail;
+    }
+
+    iunlockput(path_dp);
+
+    iunlockput(path_ip);
+    end_op();
+
+    return 0;
+
+fail:
+    // something went wrong. de-allocate ip.
+    path_ip->nlink = 0;
+    iupdate(path_ip);
+    iunlock(path_ip);
+bad_path:        
+    iunlockput(path_dp);
+    iput(path_ip);
+    end_op();
+    return -1;
 }
