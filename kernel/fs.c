@@ -396,7 +396,7 @@ bmap(struct inode *ip, uint bn)
   }
   bn -= NDIRECT;
 
-  if(bn < NINDIRECT){
+  if(bn < SINGLY_NINDIRECT){
     // Load indirect block, allocating if necessary.
     if((addr = ip->addrs[NDIRECT]) == 0){
       addr = balloc(ip->dev);
@@ -416,6 +416,42 @@ bmap(struct inode *ip, uint bn)
     brelse(bp);
     return addr;
   }
+
+    bn -= SINGLY_NINDIRECT;
+    if(bn < DOUBLY_NINDIRECT){
+        // Load indirect block, allocating if necessary.
+        if((addr = ip->addrs[NDIRECT + 1]) == 0){
+            addr = balloc(ip->dev);
+            if(addr == 0)
+                return 0;
+            ip->addrs[NDIRECT + 1] = addr;
+        }
+        bp = bread(ip->dev, addr);
+        a = (uint*)bp->data;
+        if((addr = a[bn / SINGLY_NINDIRECT]) == 0){
+            addr = balloc(ip->dev);
+            if(addr == 0){
+                brelse(bp);
+                return 0;
+            }
+            a[bn / SINGLY_NINDIRECT] = addr;
+            log_write(bp);
+        }
+        brelse(bp);
+        bp = bread(ip->dev, addr);
+        a = (uint*)bp->data;
+        if((addr = a[bn % SINGLY_NINDIRECT]) == 0){
+            addr = balloc(ip->dev);
+            if(addr == 0){
+                brelse(bp);
+                return 0;
+            }
+            a[bn % SINGLY_NINDIRECT] = addr;
+            log_write(bp);
+        }
+        brelse(bp);
+        return addr;
+    }
 
   panic("bmap: out of range");
 }
@@ -439,7 +475,7 @@ itrunc(struct inode *ip)
   if(ip->addrs[NDIRECT]){
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
-    for(j = 0; j < NINDIRECT; j++){
+    for(j = 0; j < SINGLY_NINDIRECT; j++){
       if(a[j])
         bfree(ip->dev, a[j]);
     }
@@ -447,6 +483,28 @@ itrunc(struct inode *ip)
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
   }
+
+    if(ip->addrs[NDIRECT + 1]){
+        bp = bread(ip->dev, ip->addrs[NDIRECT + 1]);
+        a = (uint*)bp->data;
+        for(j = 0; j < SINGLY_NINDIRECT; j++){
+            if(a[j]){
+                struct buf *new_bp = 0;
+                uint *new_a = 0;
+                new_bp = bread(ip->dev, a[j]);
+                new_a = (uint*)new_bp->data;
+                for(uint x = 0; x < SINGLY_NINDIRECT; x++){
+                    if(new_a[x])
+                        bfree(ip->dev, new_a[x]);
+                }
+                brelse(new_bp);
+                bfree(ip->dev, a[j]);
+            }
+        }
+        brelse(bp);
+        bfree(ip->dev, ip->addrs[NDIRECT + 1]);
+        ip->addrs[NDIRECT + 1] = 0;
+    }
 
   ip->size = 0;
   iupdate(ip);

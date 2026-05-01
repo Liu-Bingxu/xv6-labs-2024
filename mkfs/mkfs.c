@@ -258,7 +258,8 @@ iappend(uint inum, void *xp, int n)
   uint fbn, off, n1;
   struct dinode din;
   char buf[BSIZE];
-  uint indirect[NINDIRECT];
+  uint singly_indirect[SINGLY_NINDIRECT];
+  uint doubly_indirect[SINGLY_NINDIRECT];
   uint x;
 
   rinode(inum, &din);
@@ -272,16 +273,31 @@ iappend(uint inum, void *xp, int n)
         din.addrs[fbn] = xint(freeblock++);
       }
       x = xint(din.addrs[fbn]);
-    } else {
+    } else if(fbn < (NDIRECT + SINGLY_NINDIRECT)){
       if(xint(din.addrs[NDIRECT]) == 0){
         din.addrs[NDIRECT] = xint(freeblock++);
       }
-      rsect(xint(din.addrs[NDIRECT]), (char*)indirect);
-      if(indirect[fbn - NDIRECT] == 0){
-        indirect[fbn - NDIRECT] = xint(freeblock++);
-        wsect(xint(din.addrs[NDIRECT]), (char*)indirect);
+      rsect(xint(din.addrs[NDIRECT]), (char*)singly_indirect);
+      if(singly_indirect[fbn - NDIRECT] == 0){
+        singly_indirect[fbn - NDIRECT] = xint(freeblock++);
+        wsect(xint(din.addrs[NDIRECT]), (char*)singly_indirect);
       }
-      x = xint(indirect[fbn-NDIRECT]);
+      x = xint(singly_indirect[fbn-NDIRECT]);
+    } else {
+      if(xint(din.addrs[NDIRECT + 1]) == 0){
+        din.addrs[NDIRECT + 1] = xint(freeblock++);
+      }
+      rsect(xint(din.addrs[NDIRECT + 1]), (char*)singly_indirect);
+      if(singly_indirect[(fbn - NDIRECT - SINGLY_NINDIRECT) / SINGLY_NINDIRECT] == 0){
+        singly_indirect[(fbn - NDIRECT - SINGLY_NINDIRECT) / SINGLY_NINDIRECT] = xint(freeblock++);
+        wsect(xint(din.addrs[NDIRECT + 1]), (char*)singly_indirect);
+      }
+      rsect(xint(singly_indirect[(fbn - NDIRECT - SINGLY_NINDIRECT) / SINGLY_NINDIRECT]), (char*)doubly_indirect);
+      if(doubly_indirect[(fbn - NDIRECT - SINGLY_NINDIRECT) % SINGLY_NINDIRECT] == 0){
+        doubly_indirect[(fbn - NDIRECT - SINGLY_NINDIRECT) % SINGLY_NINDIRECT] = xint(freeblock++);
+        wsect(xint(singly_indirect[(fbn - NDIRECT - SINGLY_NINDIRECT) / SINGLY_NINDIRECT]), (char*)doubly_indirect);
+      }
+      x = xint(doubly_indirect[(fbn - NDIRECT - SINGLY_NINDIRECT) % SINGLY_NINDIRECT]);
     }
     n1 = min(n, (fbn + 1) * BSIZE - off);
     rsect(x, buf);
