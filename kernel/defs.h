@@ -12,6 +12,7 @@ struct spinlock;
 struct sleeplock;
 struct stat;
 struct superblock;
+struct vma_struct;
 
 // bio.c
 void            binit(void);
@@ -28,6 +29,7 @@ void            consputc(int);
 
 // exec.c
 int             exec(char*, char**);
+uint64          loadseg_from_vma_onepage(pagetable_t, uint64, struct vma_struct *);
 
 // file.c
 struct file*    filealloc(void);
@@ -92,7 +94,7 @@ int             fork(void);
 int             growproc(int);
 void            proc_mapstacks(pagetable_t);
 pagetable_t     proc_pagetable(struct proc *);
-void            proc_freepagetable(pagetable_t, uint64);
+void            proc_freepagetable(pagetable_t);
 int             kill(int);
 int             killed(struct proc*);
 void            setkilled(struct proc*);
@@ -171,11 +173,12 @@ int             mappages(pagetable_t, uint64, uint64, uint64, int);
 pagetable_t     uvmcreate(void);
 void            uvmfirst(pagetable_t, uchar *, uint);
 uint64          uvmalloc(pagetable_t, uint64, uint64, int);
-uint64          uvmdealloc(pagetable_t, uint64, uint64);
-int             uvmcopy(pagetable_t, pagetable_t, uint64);
-void            uvmfree(pagetable_t, uint64);
+// uint64          uvmdealloc(pagetable_t, uint64, uint64);
+int             uvmcopy(pagetable_t, pagetable_t);
+int             vm_growproc(struct proc *, int);
+void            uvmfree(pagetable_t);
 void            uvmunmap(pagetable_t, uint64, uint64, int);
-void            uvmclear(pagetable_t, uint64);
+// void            uvmclear(pagetable_t, uint64);
 pte_t *         walk(pagetable_t, uint64, int);
 uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);

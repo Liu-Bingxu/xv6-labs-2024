@@ -12,6 +12,7 @@
 #include <stdarg.h>
 
 #include "types.h"
+#include "list.h"
 #include "param.h"
 #include "spinlock.h"
 #include "sleeplock.h"

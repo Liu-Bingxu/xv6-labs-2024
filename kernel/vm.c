@@ -1,10 +1,14 @@
 #include "param.h"
 #include "types.h"
+#include "list.h"
 #include "memlayout.h"
 #include "elf.h"
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "vm.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -14,6 +18,122 @@ pagetable_t kernel_pagetable;
 extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
+
+struct vma_struct_run {
+     struct vma_struct_run *next;
+};
+
+struct {
+    struct spinlock lock;
+    struct vma_struct_run *freelist;
+} vma_list;
+
+struct vma_struct *vma_alloc(void){
+    struct vma_struct_run *r;
+
+    acquire(&vma_list.lock);
+    r = vma_list.freelist;
+    if(r){
+        vma_list.freelist = r->next;
+    }else{
+        struct vma_struct *temp = (struct vma_struct *) kalloc();
+        if(temp == 0)
+            panic("vma_alloc");
+        for(uint64 i = 1; i < (PGSIZE / vma_size); i++){
+            r = (struct vma_struct_run *)(&temp[i]);
+            r->next = vma_list.freelist;
+            vma_list.freelist = r;
+        }
+        r = (struct vma_struct_run *)temp;
+    }
+    release(&vma_list.lock);
+
+    memset((char*)r, 0, vma_size);
+
+    return (struct vma_struct *)r;
+}
+void vma_free(struct vma_struct *vma){
+    struct vma_struct_run *r;
+
+    if(vma == 0)
+        panic("vma_free");
+
+    r = (struct vma_struct_run *)vma;
+
+    acquire(&vma_list.lock);
+    r->next = vma_list.freelist;
+    vma_list.freelist = r;
+    release(&vma_list.lock);
+}
+void free_all_vma(struct list *vma){
+    struct list *pos = 0;
+    struct vma_struct *free_vma = 0;
+    list_del_for_each(pos, vma){
+        vma_list_entry(free_vma, pos->prev);
+        list_del(&free_vma->vma_list);
+        vma_free(free_vma);
+    }
+}
+
+int uvmacopy(struct list *pvma, struct list *npvma, struct proc *p, struct proc *np){
+    struct list *pos = 0;
+    struct vma_struct *free_vma = 0;
+    list_for_each(pos, pvma){
+        vma_list_entry(free_vma, pos);
+        struct vma_struct *vma = vma_alloc();
+        if(vma == 0){
+            free_all_vma(npvma);
+            return -1;
+        }
+        *vma = *free_vma;
+        init_list(&vma->vma_list);
+        vma->p = np;
+        list_add_tail(npvma, &vma->vma_list);
+        if(p->heap == free_vma)
+            np->heap = vma;
+    }
+    return 0;
+}
+int do_page_error(uint64 scause, uint64 vaddr){
+    struct proc *p = myproc();
+    struct list *pos;
+    struct vma_struct *vma = 0;
+    list_for_each(pos, &p->vma){
+        vma_list_entry(vma, pos);
+        if((vma->vaddr_start <= vaddr) && (vaddr < vma->vaddr_end)){
+            if((scause == 12) && ((vma->vma_port & VM_PROT_EXEC) == 0))
+                return -1;
+            if((scause == 13) && ((vma->vma_port & VM_PROT_READ) == 0))
+                return -1;
+            if((scause == 15) && ((vma->vma_port & VM_PROT_WRITE) == 0))
+                return -1;
+            switch (vma->vma_type){
+                case VMA_DDR:
+                    int xperm = 0;
+                    if(vma->vma_port & VM_PROT_EXEC)
+                        xperm |= PTE_X;
+                    if(vma->vma_port & VM_PROT_WRITE)
+                        xperm |= PTE_W;
+                    if(uvmalloc(p->pagetable, PGROUNDDOWN(vaddr), PGSIZE, xperm) == 0)
+                        return -1;
+                    goto out;
+                case VMA_FILE:
+                    if(loadseg_from_vma_onepage(p->pagetable, PGROUNDDOWN(vaddr), vma) == 0)
+                        return -1;
+                    goto out;
+                case VMA_MMAP:
+                    return -1;
+                case VMA_NONE:
+                case VMA_START:
+                default:
+                    return -1;
+                    break;  
+            }
+        }
+    }
+out:
+    return 0;
+}
 
 // Make a direct-map page table for the kernel.
 pagetable_t
@@ -54,6 +174,7 @@ void
 kvminit(void)
 {
   kernel_pagetable = kvmmake();
+    initlock(&vma_list.lock, "vma_list");
 }
 
 // Switch h/w page table register to the kernel's page table,
@@ -223,54 +344,111 @@ uvmfirst(pagetable_t pagetable, uchar *src, uint sz)
     panic("uvmfirst: more than a page");
   mem = kalloc();
   memset(mem, 0, PGSIZE);
+  struct vma_struct *vma = vma_alloc();
+  if(vma == 0)
+    panic("uvmfirst couldn't get vma");
+  vma->vaddr_start = 0;
+  vma->vaddr_end   = sz;
+  extern struct proc *initproc;
+  vma->p           = initproc;
+  init_list(&vma->vma_list);
+  vma->off         = 0;
+  vma->vma_type    = VMA_START;
+  vma->filp        = 0;
+  vma->vma_port    = VM_PROT_EXEC | VM_PROT_READ | VM_PROT_WRITE;
+  list_add_head(&initproc->vma, &vma->vma_list);
   mappages(pagetable, 0, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U);
   memmove(mem, src, sz);
 }
 
-// Allocate PTEs and physical memory to grow process from oldsz to
-// newsz, which need not be page aligned.  Returns new size or 0 on error.
+// Allocate PTEs and physical memory to map process space from heap
+// Returns 0 on true or -1 on error.
+int vm_growproc(struct proc *p, int n){
+    if(n > 0){
+        uint64 end = PGROUNDUP(p->heap->vaddr_end);
+        uint64 new_end = PGROUNDUP(p->heap->vaddr_end + n);
+        if(new_end >= TRAPFRAME)
+            return -1;
+        p->heap->vaddr_end += n;
+        if(new_end == end)
+            return 0;
+        if(uvmalloc(p->pagetable, end, (new_end - end), PTE_W) == 0){
+            p->heap->vaddr_end -= n;
+            return -1;
+        }
+    }else if(n < 0){
+        uint64 end = PGROUNDUP(p->heap->vaddr_end);
+        uint64 new_end = PGROUNDUP(p->heap->vaddr_end + n);
+        p->heap->vaddr_end += n;
+        if(new_end == end)
+            return 0;
+        uvmunmap(p->pagetable, new_end, ((end - new_end) / PGSIZE), 1);
+    }
+
+    return 0;
+}
+
+// Allocate PTEs and physical memory to map process space from start to start + sz
+// which need be page aligned.  Returns 1 on true or 0 on error.
 uint64
-uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
+uvmalloc(pagetable_t pagetable, uint64 start, uint64 sz, int xperm)
 {
   char *mem;
   uint64 a;
 
-  if(newsz < oldsz)
-    return oldsz;
+  if((start % PGSIZE) != 0)
+    return 0;
 
-  oldsz = PGROUNDUP(oldsz);
-  for(a = oldsz; a < newsz; a += PGSIZE){
+  for(a = start; a < (start + sz); a += PGSIZE){
     mem = kalloc();
     if(mem == 0){
-      uvmdealloc(pagetable, a, oldsz);
+      uvmunmap(pagetable, start, ((a - start) / PGSIZE), 1);
       return 0;
     }
     memset(mem, 0, PGSIZE);
     if(mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_R|PTE_U|xperm) != 0){
       kfree(mem);
-      uvmdealloc(pagetable, a, oldsz);
+      uvmunmap(pagetable, start, ((a - start) / PGSIZE), 1);
       return 0;
     }
   }
-  return newsz;
+  return 1;
 }
 
 // Deallocate user pages to bring the process size from oldsz to
 // newsz.  oldsz and newsz need not be page-aligned, nor does newsz
 // need to be less than oldsz.  oldsz can be larger than the actual
 // process size.  Returns the new process size.
-uint64
-uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
+// uint64
+// uvmdealloc(pagetable_t pagetable, uint64 start, uint64 sz)
+// {
+//   if(newsz >= oldsz)
+//     return oldsz;
+
+//   if(PGROUNDUP(newsz) < PGROUNDUP(oldsz)){
+//     int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
+//     uvmunmap(pagetable, PGROUNDUP(newsz), npages, 1);
+//   }
+
+//   return newsz;
+// }
+
+// Recursively Free user memory pages,
+void
+freewalk_user_memory(pagetable_t pagetable)
 {
-  if(newsz >= oldsz)
-    return oldsz;
-
-  if(PGROUNDUP(newsz) < PGROUNDUP(oldsz)){
-    int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
-    uvmunmap(pagetable, PGROUNDUP(newsz), npages, 1);
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      // this PTE points to a lower-level page table.
+      uint64 child = PTE2PA(pte);
+      freewalk_user_memory((pagetable_t)child);
+    } else if(pte & PTE_V){
+      kfree((void *)(PTE2PA(pte)));
+      pagetable[i] = 0;
+    }
   }
-
-  return newsz;
 }
 
 // Recursively free page-table pages.
@@ -296,10 +474,11 @@ freewalk(pagetable_t pagetable)
 // Free user memory pages,
 // then free page-table pages.
 void
-uvmfree(pagetable_t pagetable, uint64 sz)
+uvmfree(pagetable_t pagetable)
 {
-  if(sz > 0)
-    uvmunmap(pagetable, 0, PGROUNDUP(sz)/PGSIZE, 1);
+//   if(sz > 0)
+//     uvmunmap(pagetable, 0, PGROUNDUP(sz)/PGSIZE, 1);
+  freewalk_user_memory(pagetable);
   freewalk(pagetable);
 }
 
@@ -310,18 +489,18 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
 int
-uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
+uvmcopy(pagetable_t old, pagetable_t new)
 {
   pte_t *pte;
   uint64 pa, i;
   uint flags;
   char *mem;
 
-  for(i = 0; i < sz; i += PGSIZE){
+  for(i = 0; i < TRAPFRAME; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+      continue;
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      continue;
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -335,22 +514,22 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   return 0;
 
  err:
-  uvmunmap(new, 0, i / PGSIZE, 1);
+//   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
 }
 
 // mark a PTE invalid for user access.
 // used by exec for the user stack guard page.
-void
-uvmclear(pagetable_t pagetable, uint64 va)
-{
-  pte_t *pte;
+// void
+// uvmclear(pagetable_t pagetable, uint64 va)
+// {
+//   pte_t *pte;
   
-  pte = walk(pagetable, va, 0);
-  if(pte == 0)
-    panic("uvmclear");
-  *pte &= ~PTE_U;
-}
+//   pte = walk(pagetable, va, 0);
+//   if(pte == 0)
+//     panic("uvmclear");
+//   *pte &= ~PTE_U;
+// }
 
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
@@ -366,8 +545,33 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     if(va0 >= MAXVA)
       return -1;
     pte = walk(pagetable, va0, 0);
-    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
-       (*pte & PTE_W) == 0)
+    if(pte == 0 || (*pte & PTE_V) == 0){
+      struct list *pos = 0;
+      struct proc *p = myproc();
+      struct vma_struct *vma = 0;
+      list_for_each(pos, &p->vma){
+        vma_list_entry(vma, pos);
+        if(vma && (vma->vaddr_start <= va0) && (va0 < vma->vaddr_end))
+          break;
+        vma = 0;
+      }
+      if(vma == 0)
+        return -1;
+      pa0 = loadseg_from_vma_onepage(pagetable, va0, vma);
+      if(pa0 == 0)
+        return -1;
+      uint64 perm = PTE_U | PTE_V;
+      if(vma->vma_port & VM_PROT_EXEC)
+        perm |= PTE_X;
+      if(vma->vma_port & VM_PROT_READ)
+        perm |= PTE_R;
+      if(vma->vma_port & VM_PROT_WRITE)
+        perm |= PTE_W;
+      if(pte == 0)
+        pte = walk(pagetable, va0, 0);
+      *pte = PA2PTE(pa0) | perm;
+    }
+    if((*pte & PTE_U) == 0 || (*pte & PTE_W) == 0)
       return -1;
     pa0 = PTE2PA(*pte);
     n = PGSIZE - (dstva - va0);
@@ -393,8 +597,22 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+    if(pa0 == 0){
+      struct list *pos = 0;
+      struct proc *p = myproc();
+      struct vma_struct *vma = 0;
+      list_for_each(pos, &p->vma){
+        vma_list_entry(vma, pos);
+        if(vma && (vma->vaddr_start <= va0) && (va0 < vma->vaddr_end))
+          break;
+        vma = 0;
+      }
+      if(vma == 0)
+        return -1;
+      pa0 = loadseg_from_vma_onepage(pagetable, va0, vma);
+      if(pa0 == 0)
+        return -1;
+    }
     n = PGSIZE - (srcva - va0);
     if(n > len)
       n = len;
@@ -420,8 +638,22 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   while(got_null == 0 && max > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+    if(pa0 == 0){
+      struct list *pos = 0;
+      struct proc *p = myproc();
+      struct vma_struct *vma = 0;
+      list_for_each(pos, &p->vma){
+        vma_list_entry(vma, pos);
+        if(vma && (vma->vaddr_start <= va0) && (va0 < vma->vaddr_end))
+          break;
+        vma = 0;
+      }
+      if(vma == 0)
+        return -1;
+      pa0 = loadseg_from_vma_onepage(pagetable, va0, vma);
+      if(pa0 == 0)
+        return -1;
+    }
     n = PGSIZE - (srcva - va0);
     if(n > max)
       n = max;

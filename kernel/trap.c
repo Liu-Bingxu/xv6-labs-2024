@@ -1,10 +1,12 @@
 #include "types.h"
+#include "list.h"
 #include "param.h"
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "vm.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -65,6 +67,22 @@ usertrap(void)
     intr_on();
 
     syscall();
+  }else if((r_scause() == 12) || (r_scause() == 13) || (r_scause() == 15)){
+    // page_error
+
+    if(killed(p))
+      exit(-1);
+
+    uint64 scause = r_scause();
+    uint64 vaddr = r_stval();
+    // an interrupt will change sepc, scause, and sstatus,
+    // so enable only now that we're done with those registers.
+    intr_on();
+
+    if(do_page_error(scause, vaddr) != 0){
+      printf("usertrap(): do_page_error error\n");
+      exit(-1);
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

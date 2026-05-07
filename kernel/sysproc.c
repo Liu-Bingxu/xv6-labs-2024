@@ -1,10 +1,12 @@
 #include "types.h"
+#include "list.h"
 #include "riscv.h"
 #include "defs.h"
 #include "param.h"
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "vm.h"
 
 uint64
 sys_exit(void)
@@ -42,7 +44,7 @@ sys_sbrk(void)
   int n;
 
   argint(0, &n);
-  addr = myproc()->sz;
+  addr = myproc()->heap->vaddr_end;
   if(growproc(n) < 0)
     return -1;
   return addr;
