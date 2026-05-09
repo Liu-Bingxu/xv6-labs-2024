@@ -9,6 +9,8 @@
 #include "vm.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "sleeplock.h"
+#include "file.h"
 
 /*
  * the kernel's page table.
@@ -36,6 +38,16 @@ struct vma_struct *vma_alloc(void){
     if(r){
         vma_list.freelist = r->next;
     }else{
+        for(uint z = 0; z < 63; z++){
+            struct vma_struct *temp = (struct vma_struct *) kalloc();
+            if(temp == 0)
+                panic("vma_alloc_loop");
+            for(uint64 i = 0; i < (PGSIZE / vma_size); i++){
+                r = (struct vma_struct_run *)(&temp[i]);
+                r->next = vma_list.freelist;
+                vma_list.freelist = r;
+            }
+        }
         struct vma_struct *temp = (struct vma_struct *) kalloc();
         if(temp == 0)
             panic("vma_alloc");
@@ -71,6 +83,13 @@ void free_all_vma(struct list *vma){
     list_del_for_each(pos, vma){
         vma_list_entry(free_vma, pos->prev);
         list_del(&free_vma->vma_list);
+        if(free_vma->vma_type == VMA_FILE){
+            begin_op();
+            iput(free_vma->ip);
+            end_op();
+        }
+        if(free_vma->vma_type == VMA_MMAP)
+            fileclose(free_vma->filp);
         vma_free(free_vma);
     }
 }
@@ -89,10 +108,67 @@ int uvmacopy(struct list *pvma, struct list *npvma, struct proc *p, struct proc 
         init_list(&vma->vma_list);
         vma->p = np;
         list_add_tail(npvma, &vma->vma_list);
+        if(vma->vma_type == VMA_FILE)
+            vma->ip = idup(free_vma->ip);
+        if(vma->vma_type == VMA_MMAP)
+            vma->filp = filedup(free_vma->filp);
         if(p->heap == free_vma)
             np->heap = vma;
     }
     return 0;
+}
+static int loadmmap_file_from_vma_onepage_share(pagetable_t pagetable, uint64 va, struct vma_struct *vma, int xperm){
+    uint64 off = va - vma->vaddr_start + vma->off;
+    uint64 pa = find_and_get_file_page(off, vma->filp->ip);
+    if(pa == 0)
+        panic("loadmmap_file_from_vma_onepage_share uvmalloc error");
+    if(mappages(pagetable, va, PGSIZE, pa, xperm | PTE_U | PTE_R) != 0){
+        uint ref = put_file_page(pa, 0);
+        if(ref == 0)
+            kfree((void *)pa);
+        return -1;
+    }
+    return 0;
+}
+static int loadmmap_file_from_vma_onepage_priv(pagetable_t pagetable, uint64 va, struct vma_struct *vma, int xperm){
+    if(uvmalloc(pagetable, va, PGSIZE, xperm) == 0)
+        return -1;
+    pte_t *pte = walk(pagetable, va, 0);
+    uint64 pa = PTE2PA(*pte);
+    if(pa == 0)
+        panic("loadmmap_file_from_vma_onepage uvmalloc error");
+    uint n = 0;
+    uint64 off = va - vma->vaddr_start;
+    if(vma->filp->ip->size < (vma->off + off))
+        return 0;
+    begin_op();
+    ilock(vma->filp->ip);
+    if((vma->filp->ip->size - vma->off - off) < PGSIZE)
+        n = (vma->filp->ip->size - vma->off - off);
+    else 
+        n = PGSIZE;
+    if (readi(vma->filp->ip, 0, pa, vma->off + off, n) != n)
+        panic("loadmmap_file_from_vma_onepage: readi");
+    if(n != PGSIZE)
+        memset((void *)(pa + n), 0, (PGSIZE -n));
+    iunlock(vma->filp->ip);
+    end_op();
+    return 0;
+}
+static int loadmmap_file_from_vma_onepage(pagetable_t pagetable, uint64 va, struct vma_struct *vma){
+    int xperm = 0;
+    if(vma->vma_port & VM_PROT_EXEC)
+        xperm |= PTE_X;
+    if(vma->vma_port & VM_PROT_WRITE)
+        xperm |= PTE_W;
+    if((vma->vma_flags & VM_FLAGS_SHARE) && (vma->vma_flags & VM_FLAGS_PRIVATE))
+        panic("loadmmap_file_from_vma_onepage: vma flags error");
+    if(vma->vma_flags & VM_FLAGS_SHARE)
+        return loadmmap_file_from_vma_onepage_share(pagetable, va, vma, xperm);
+    if(vma->vma_flags & VM_FLAGS_PRIVATE)
+        return loadmmap_file_from_vma_onepage_priv(pagetable, va, vma, xperm);
+    printf("vma flag unknow\n");
+    return -1;
 }
 int do_page_error(uint64 scause, uint64 vaddr){
     struct proc *p = myproc();
@@ -109,20 +185,24 @@ int do_page_error(uint64 scause, uint64 vaddr){
                 return -1;
             switch (vma->vma_type){
                 case VMA_DDR:
-                    int xperm = 0;
-                    if(vma->vma_port & VM_PROT_EXEC)
-                        xperm |= PTE_X;
-                    if(vma->vma_port & VM_PROT_WRITE)
-                        xperm |= PTE_W;
-                    if(uvmalloc(p->pagetable, PGROUNDDOWN(vaddr), PGSIZE, xperm) == 0)
-                        return -1;
-                    goto out;
-                case VMA_FILE:
-                    if(loadseg_from_vma_onepage(p->pagetable, PGROUNDDOWN(vaddr), vma) == 0)
-                        return -1;
-                    goto out;
-                case VMA_MMAP:
+                    // int xperm = 0;
+                    // if(vma->vma_port & VM_PROT_EXEC)
+                    //     xperm |= PTE_X;
+                    // if(vma->vma_port & VM_PROT_WRITE)
+                    //     xperm |= PTE_W;
+                    // if(uvmalloc(p->pagetable, PGROUNDDOWN(vaddr), PGSIZE, xperm) == 0)
+                    //     return -1;
+                    // goto out;
                     return -1;
+                case VMA_FILE:
+                    // if(loadseg_from_vma_onepage(p->pagetable, PGROUNDDOWN(vaddr), vma) == 0)
+                    //     return -1;
+                    // goto out;
+                    return -1;
+                case VMA_MMAP:
+                    if(loadmmap_file_from_vma_onepage(p->pagetable, PGROUNDDOWN(vaddr), vma) != 0)
+                        return -1;
+                    goto out;
                 case VMA_NONE:
                 case VMA_START:
                 default:
@@ -131,6 +211,7 @@ int do_page_error(uint64 scause, uint64 vaddr){
             }
         }
     }
+    return -1;
 out:
     return 0;
 }
@@ -367,7 +448,7 @@ int vm_growproc(struct proc *p, int n){
     if(n > 0){
         uint64 end = PGROUNDUP(p->heap->vaddr_end);
         uint64 new_end = PGROUNDUP(p->heap->vaddr_end + n);
-        if(new_end >= TRAPFRAME)
+        if(new_end >= HEAP_PROT)
             return -1;
         p->heap->vaddr_end += n;
         if(new_end == end)
@@ -379,7 +460,11 @@ int vm_growproc(struct proc *p, int n){
     }else if(n < 0){
         uint64 end = PGROUNDUP(p->heap->vaddr_end);
         uint64 new_end = PGROUNDUP(p->heap->vaddr_end + n);
+        if((new_end < p->heap->vaddr_start) || (new_end > p->heap->vaddr_end))
+            new_end = p->heap->vaddr_start;
         p->heap->vaddr_end += n;
+        if(new_end == p->heap->vaddr_start)
+            p->heap->vaddr_end = p->heap->vaddr_start;
         if(new_end == end)
             return 0;
         uvmunmap(p->pagetable, new_end, ((end - new_end) / PGSIZE), 1);
@@ -434,26 +519,44 @@ uvmalloc(pagetable_t pagetable, uint64 start, uint64 sz, int xperm)
 // }
 
 // Recursively Free user memory pages,
-void
-freewalk_user_memory(pagetable_t pagetable)
+static void
+freewalk_user_memory(pagetable_t pagetable, uint64 start_va, uint64 level, struct proc *p)
 {
   // there are 2^9 = 512 PTEs in a page table.
-  for(int i = 0; i < 512; i++){
+  struct list *pos;
+  struct vma_struct *vma;
+  if(level > 2)
+    panic("freewalk_user_memory: level error");
+  for(uint i = 0; i < 512; i++){
     pte_t pte = pagetable[i];
     if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
       // this PTE points to a lower-level page table.
       uint64 child = PTE2PA(pte);
-      freewalk_user_memory((pagetable_t)child);
+      freewalk_user_memory((pagetable_t)child, start_va + ((level == 0) ? (512 * 512 * PGSIZE * i) : (512 * PGSIZE * i)), level + 1, p);
     } else if(pte & PTE_V){
-      kfree((void *)(PTE2PA(pte)));
-      pagetable[i] = 0;
+      #define VA(index, level)  ((level == 0) ? (512UL * 512UL * (uint64)PGSIZE * index) : ((level == 1) ? (512UL * (uint64)PGSIZE * index) : ((uint64)PGSIZE * index)))
+      if((VA(i, level) + start_va) >= MMAP_START){
+        list_for_each(pos, &p->vma){
+          vma_list_entry(vma, pos);
+          if((vma->vaddr_start <= (VA(i, level) + start_va)) && ((VA(i, level) + start_va) < vma->vaddr_end) && (vma->vma_flags & VM_FLAGS_SHARE)){
+            uint ref = put_file_page(PTE2PA(pte), ((pte & PTE_D) != 0));
+            if(ref == 0)
+                kfree((void *)PTE2PA(pte));
+            pagetable[i] = 0;
+            break;
+          }
+        }
+      }else{
+        kfree((void *)(PTE2PA(pte)));
+        pagetable[i] = 0;
+      }
     }
   }
 }
 
 // Recursively free page-table pages.
 // All leaf mappings must already have been removed.
-void
+static void
 freewalk(pagetable_t pagetable)
 {
   // there are 2^9 = 512 PTEs in a page table.
@@ -474,11 +577,11 @@ freewalk(pagetable_t pagetable)
 // Free user memory pages,
 // then free page-table pages.
 void
-uvmfree(pagetable_t pagetable)
+uvmfree(pagetable_t pagetable, struct proc *p)
 {
 //   if(sz > 0)
 //     uvmunmap(pagetable, 0, PGROUNDUP(sz)/PGSIZE, 1);
-  freewalk_user_memory(pagetable);
+  freewalk_user_memory(pagetable, 0, 0, p);
   freewalk(pagetable);
 }
 
@@ -495,8 +598,11 @@ uvmcopy(pagetable_t old, pagetable_t new)
   uint64 pa, i;
   uint flags;
   char *mem;
+  struct proc *p = myproc();
+  struct list *pos;
+  struct vma_struct *vma;
 
-  for(i = 0; i < TRAPFRAME; i += PGSIZE){
+  for(i = 0; i < p->heap->vaddr_end; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       continue;
     if((*pte & PTE_V) == 0)
@@ -509,6 +615,36 @@ uvmcopy(pagetable_t old, pagetable_t new)
     if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
       kfree(mem);
       goto err;
+    }
+  }
+
+  list_for_each(pos, &p->vma){
+    vma_list_entry(vma, pos);
+    if((vma->vaddr_start >= MMAP_START)){
+      for(i = vma->vaddr_start; i < vma->vaddr_end; i += PGSIZE){
+        if((pte = walk(old, i, 0)) == 0)
+          continue;
+        if((*pte & PTE_V) == 0)
+          continue;
+        pa = PTE2PA(*pte);
+        flags = PTE_FLAGS(*pte);
+        if((vma->vma_flags & VM_FLAGS_SHARE)){
+          mem = (char *)find_and_get_file_page(i - vma->vaddr_start + vma->off, vma->filp->ip);
+          goto map;
+        }
+        if((mem = kalloc()) == 0)
+          goto err;
+        memmove(mem, (char*)pa, PGSIZE);
+        map:
+        if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+          uint ref = 0;
+          if((vma->vma_flags & VM_FLAGS_SHARE))
+            ref = put_file_page((uint64)mem, 0);
+          if(ref == 0)
+            kfree(mem);
+          goto err;
+        }
+      }
     }
   }
   return 0;

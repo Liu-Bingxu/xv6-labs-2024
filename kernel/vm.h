@@ -4,6 +4,9 @@ struct vma_struct{
 #define VM_PROT_WRITE 0x2
 #define VM_PROT_EXEC  0x4
     char vma_port;
+#define VM_FLAGS_SHARE   0x1
+#define VM_FLAGS_PRIVATE 0x2
+    char vma_flags;
     uint64 vaddr_start;
     uint64 vaddr_end;
     struct proc *p;

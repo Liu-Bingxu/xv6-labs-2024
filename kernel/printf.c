@@ -67,6 +67,7 @@ printf(char *fmt, ...)
   va_list ap;
   int i, cx, c0, c1, c2, locking;
   char *s;
+  char c;
 
   locking = pr.locking;
   if(locking)
@@ -109,6 +110,9 @@ printf(char *fmt, ...)
       i += 2;
     } else if(c0 == 'p'){
       printptr(va_arg(ap, uint64));
+    } else if(c0 == 'c'){
+      if((c = va_arg(ap, int)) != 0)
+        consputc(c);
     } else if(c0 == 's'){
       if((s = va_arg(ap, char*)) == 0)
         s = "(null)";

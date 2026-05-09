@@ -11,15 +11,15 @@
 
 static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
 
-// int flags2perm(int flags)
-// {
-//     int perm = 0;
-//     if(flags & 0x1)
-//       perm = PTE_X;
-//     if(flags & 0x2)
-//       perm |= PTE_W;
-//     return perm;
-// }
+int flags2perm(int flags)
+{
+    int perm = 0;
+    if(flags & 0x1)
+      perm = PTE_X;
+    if(flags & 0x2)
+      perm |= PTE_W;
+    return perm;
+}
 
 int
 exec(char *path, char **argv)
@@ -32,8 +32,9 @@ exec(char *path, char **argv)
   struct proghdr ph;
   pagetable_t pagetable = 0, oldpagetable;
   struct proc *p = myproc();
-  struct list oldvma;
-  list_chg_head(&p->vma, &oldvma);
+  struct proc temp_p;
+  temp_p = *p;
+  list_chg_head(&p->vma, &temp_p.vma);
 
   begin_op();
 
@@ -67,10 +68,6 @@ exec(char *path, char **argv)
       goto bad;
     if(ph.vaddr % PGSIZE != 0)
       goto bad;
-    // if((ret = uvmalloc(pagetable, ph.vaddr, ph.memsz, flags2perm(ph.flags))) == 0)
-    //   goto bad;
-    // if(loadseg(pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0)
-    //   goto bad;
     struct vma_struct *vma = vma_alloc();
     if(vma == 0)
         goto bad;
@@ -87,16 +84,22 @@ exec(char *path, char **argv)
     if(ph.flags & 0x2)
       vma->vma_port |= VM_PROT_WRITE;
     list_add_head(&p->vma, &vma->vma_list);
-    max_addr = (vma->vaddr_end > max_addr) ? vma->vaddr_end : max_addr;
-    if((vma->vaddr_start <= elf.entry) && (elf.entry < vma->vaddr_end)){
-      if((ph.vaddr + ph.filesz) < elf.entry)
-        goto bad;
-      if(uvmalloc(pagetable, PGROUNDDOWN(elf.entry), PGSIZE, PTE_X) == 0)
-        goto bad;
-      uint offset = ph.off + (PGROUNDDOWN(elf.entry) - ph.vaddr);
-      uint sz = ((ph.vaddr + ph.filesz - PGROUNDDOWN(elf.entry)) > PGSIZE) ? PGSIZE : (ph.vaddr + ph.filesz - PGROUNDDOWN(elf.entry));
-      loadseg(pagetable, PGROUNDDOWN(elf.entry), ip, offset, sz);
-    }
+    // max_addr = (vma->vaddr_end > max_addr) ? vma->vaddr_end : max_addr;
+    // if((vma->vaddr_start <= elf.entry) && (elf.entry < vma->vaddr_end)){
+    //   if((ph.vaddr + ph.filesz) < elf.entry)
+    //     goto bad;
+    //   if(uvmalloc(pagetable, PGROUNDDOWN(elf.entry), PGSIZE, PTE_X) == 0)
+    //     goto bad;
+    //   uint offset = ph.off + (PGROUNDDOWN(elf.entry) - ph.vaddr);
+    //   uint sz = ((ph.vaddr + ph.filesz - PGROUNDDOWN(elf.entry)) > PGSIZE) ? PGSIZE : (ph.vaddr + ph.filesz - PGROUNDDOWN(elf.entry));
+    //   if(loadseg(pagetable, PGROUNDDOWN(elf.entry), ip, offset, sz) < 0)
+    //     goto bad;
+    // }
+    max_addr = (PGROUNDUP(ph.vaddr + ph.memsz) > max_addr) ? PGROUNDUP(ph.vaddr + ph.memsz) : max_addr;
+    if(uvmalloc(pagetable, ph.vaddr, ph.memsz, flags2perm(ph.flags)) == 0)
+      goto bad;
+    if(loadseg(pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0)
+      goto bad;
   }
   iunlockput(ip);
   end_op();
@@ -137,6 +140,11 @@ exec(char *path, char **argv)
   vma->vma_port    = VM_PROT_READ | VM_PROT_WRITE;
   list_add_head(&p->vma, &vma->vma_list);
   p->heap          = vma;
+
+  if(vma->vaddr_end >= HEAP_PROT){
+    printf("exec app too big\n");
+    goto bad;
+  }
 
   sp = vma->vaddr_end;
   stackbase = sp - USERSTACK*PGSIZE;
@@ -193,16 +201,16 @@ exec(char *path, char **argv)
   p->pagetable = pagetable;
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
-  free_all_vma(&oldvma);
-  proc_freepagetable(oldpagetable);
+  proc_freepagetable(oldpagetable, &temp_p);
+  free_all_vma(&temp_p.vma);
 
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:
   free_all_vma(&p->vma);
-  list_chg_head(&oldvma, &p->vma);
+  list_chg_head(&temp_p.vma, &p->vma);
   if(pagetable)
-    proc_freepagetable(pagetable);
+    proc_freepagetable(pagetable, &temp_p);
   if(ip){
     iunlockput(ip);
     end_op();

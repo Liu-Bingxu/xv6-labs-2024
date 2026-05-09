@@ -164,7 +164,7 @@ freeproc(struct proc *p)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
   if(p->pagetable)
-    proc_freepagetable(p->pagetable);
+    proc_freepagetable(p->pagetable, p);
   p->pagetable = 0;
   if(!list_empty(&p->vma))
     free_all_vma(&p->vma);
@@ -196,7 +196,7 @@ proc_pagetable(struct proc *p)
   // to/from user space, so not PTE_U.
   if(mappages(pagetable, TRAMPOLINE, PGSIZE,
               (uint64)trampoline, PTE_R | PTE_X) < 0){
-    uvmfree(pagetable);
+    uvmfree(pagetable, p);
     return 0;
   }
 
@@ -205,7 +205,7 @@ proc_pagetable(struct proc *p)
   if(mappages(pagetable, TRAPFRAME, PGSIZE,
               (uint64)(p->trapframe), PTE_R | PTE_W) < 0){
     uvmunmap(pagetable, TRAMPOLINE, 1, 0);
-    uvmfree(pagetable);
+    uvmfree(pagetable, p);
     return 0;
   }
 
@@ -215,11 +215,11 @@ proc_pagetable(struct proc *p)
 // Free a process's page table, and free the
 // physical memory it refers to.
 void
-proc_freepagetable(pagetable_t pagetable)
+proc_freepagetable(pagetable_t pagetable, struct proc *p)
 {
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
-  uvmfree(pagetable);
+  uvmfree(pagetable, p);
 }
 
 // a user program that calls exec("/init")
@@ -361,6 +361,13 @@ exit(int status)
       p->ofile[fd] = 0;
     }
   }
+
+  if(p->pagetable)
+    proc_freepagetable(p->pagetable, p);
+  p->pagetable = 0;
+  if(!list_empty(&p->vma))
+    free_all_vma(&p->vma);
+  init_list(&p->vma);
 
   begin_op();
   iput(p->cwd);

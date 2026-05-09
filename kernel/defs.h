@@ -69,6 +69,8 @@ void            ramdiskrw(struct buf*);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
+uint64          find_and_get_file_page(uint, struct inode *);
+uint            put_file_page(uint64, uint8);
 
 // log.c
 void            initlog(int, struct superblock*);
@@ -94,7 +96,7 @@ int             fork(void);
 int             growproc(int);
 void            proc_mapstacks(pagetable_t);
 pagetable_t     proc_pagetable(struct proc *);
-void            proc_freepagetable(pagetable_t);
+void            proc_freepagetable(pagetable_t, struct proc *);
 int             kill(int);
 int             killed(struct proc*);
 void            setkilled(struct proc*);
@@ -176,7 +178,7 @@ uint64          uvmalloc(pagetable_t, uint64, uint64, int);
 // uint64          uvmdealloc(pagetable_t, uint64, uint64);
 int             uvmcopy(pagetable_t, pagetable_t);
 int             vm_growproc(struct proc *, int);
-void            uvmfree(pagetable_t);
+void            uvmfree(pagetable_t, struct proc *);
 void            uvmunmap(pagetable_t, uint64, uint64, int);
 // void            uvmclear(pagetable_t, uint64);
 pte_t *         walk(pagetable_t, uint64, int);

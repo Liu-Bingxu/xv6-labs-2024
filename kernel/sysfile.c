@@ -16,6 +16,8 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
+#include "vm.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -506,40 +508,151 @@ sys_pipe(void)
 }
 
 uint64 sys_mmap(void){
-  uint64 fdarray; // user pointer to array of two integers
-  struct file *rf, *wf;
-  int fd0, fd1;
-  struct proc *p = myproc();
+    uint64 addr;
+    uint64 length;
+    int    prot;
+    int    flags;
+    int    fd;
+    uint   off;
+    struct file *filp;
+    struct proc *p = myproc();
 
-  argaddr(0, &fdarray);
-  if(pipealloc(&rf, &wf) < 0)
-    return -1;
-  fd0 = -1;
-  if((fd0 = fdalloc(rf)) < 0 || (fd1 = fdalloc(wf)) < 0){
-    if(fd0 >= 0)
-      p->ofile[fd0] = 0;
-    fileclose(rf);
-    fileclose(wf);
-    return -1;
-  }
-  if(copyout(p->pagetable, fdarray, (char*)&fd0, sizeof(fd0)) < 0 ||
-     copyout(p->pagetable, fdarray+sizeof(fd0), (char *)&fd1, sizeof(fd1)) < 0){
-    p->ofile[fd0] = 0;
-    p->ofile[fd1] = 0;
-    fileclose(rf);
-    fileclose(wf);
-    return -1;
-  }
-  return 0;
+    argaddr(0, &addr);
+    argaddr(1, &length);
+    argint(2,  &prot);
+    argint(3,  &flags);
+    argint(4,  &fd);
+    argint(5,  (int *)&off);
+
+    if((addr != 0) || ((addr % PGSIZE) != 0)){
+        printf("mmap addr error\n");
+        return -1;
+    }
+    if((length % PGSIZE) != 0){
+        printf("mmap length error\n");
+        return -1;
+    }
+    if((off % PGSIZE) != 0){
+        printf("mmap off error\n");
+        return -1;
+    }
+    if(fd >= NOFILE){
+        printf("mmap fd error\n");
+        return -1;
+    }
+    filp = p->ofile[fd];
+    if(((prot & PROT_READ) || (prot & PROT_EXEC)) && (filp->readable == 0)){
+        printf("mmap prot read exec error\n");
+        return -1;
+    }
+    if((prot & PROT_WRITE) && (filp->writable == 0) && ((flags & MAP_PRIVATE) == 0)){
+        printf("mmap prot write error\n");
+        return -1;
+    }
+    if(filp->type != FD_INODE){
+        printf("mmap filp error\n");
+        return -1;
+    }
+    if(((flags & MAP_SHARED) != 0) && ((flags & MAP_PRIVATE) != 0)){
+        printf("mmap flags write error\n");
+        return -1;
+    }
+    if(off > filp->ip->size){
+        printf("mmap off size error\n");
+        return -1;
+    }
+
+    struct vma_struct *vma = vma_alloc();
+    struct vma_struct *last_mmap = 0;
+    vma_list_entry(last_mmap, p->vma.next);
+    if(vma == 0)
+        return -1;
+    vma->vaddr_start = (last_mmap->vaddr_end > MMAP_START) ? PGROUNDUP(last_mmap->vaddr_end) : MMAP_START;
+    vma->vaddr_end   = vma->vaddr_start + length;
+    vma->p           = p;
+    init_list(&vma->vma_list);
+    vma->vma_type    = VMA_MMAP;
+    vma->filp        = filedup(filp);
+    vma->off         = off;
+    vma->vma_port    = 0;
+    if(prot & PROT_READ)
+        vma->vma_port    |= VM_PROT_READ;
+    if(prot & PROT_WRITE)
+        vma->vma_port    |= VM_PROT_WRITE;
+    if(prot & PROT_EXEC)
+        vma->vma_port    |= VM_PROT_EXEC;
+    vma->vma_flags    = 0;
+    if(flags & MAP_SHARED)
+        vma->vma_flags    |= VM_FLAGS_SHARE;
+    if(flags & MAP_PRIVATE)
+        vma->vma_flags    |= VM_FLAGS_PRIVATE;
+    if((vma->vma_flags & VM_FLAGS_SHARE) && (vma->vma_flags & VM_FLAGS_PRIVATE))
+        panic("mmap: vma flags error");
+    list_add_head(&p->vma, &vma->vma_list);
+
+    return vma->vaddr_start;
 }
 
 uint64 sys_munmap(void){
-    // uint64 addr; // user pointer to array of two integers
-    // uint64 len;
-    // struct proc *p = myproc();
+    uint64 addr;
+    uint64 length;
+    struct proc *p = myproc();
+    struct list *pos;
+    struct vma_struct *vma = 0;
+    pte_t *pte = 0;
+    uint free_head = 0;
+    uint free_tail = 0;
+    uint ref = 0;
 
-    // argaddr(0, &addr);
-    // argaddr(0, &len);
-    
-    return 0;
+    argaddr(0, &addr);
+    argaddr(1, &length);
+
+    if((addr % PGSIZE) != 0)
+        panic("munmap addr error");
+    if((length % PGSIZE) != 0)
+        panic("munmap length error");
+
+    list_for_each(pos, &p->vma){
+        vma_list_entry(vma, pos);
+        //现在仅支持free头和free尾，free中间将产生两个vma区域，暂时不支持
+        free_head = ((vma->vaddr_start == addr) && ((addr + length) <= vma->vaddr_end));
+        free_tail = ((vma->vaddr_start <= addr) && ((addr + length) == vma->vaddr_end));
+        if(free_head || free_tail){
+            if(vma->vma_type != VMA_MMAP)
+                return -1;
+            for(uint64 i = 0; i < length; i += PGSIZE){
+                pte = walk(p->pagetable, addr + i, 0);
+                if(pte == 0)
+                    continue;
+                if((*pte & PTE_V) == 0)
+                    continue;
+                if((vma->vma_flags & VM_FLAGS_PRIVATE) == 0){
+                    if(vma->filp->ip->size < (vma->off + i))
+                        continue;
+                    ref = put_file_page(PTE2PA(*pte), ((*pte & PTE_D) != 0));
+                }
+                if(ref == 0)
+                    uvmunmap(p->pagetable, addr + i, 1, 1);
+                else 
+                    uvmunmap(p->pagetable, addr + i, 1, 0);
+            }
+            break;
+        }
+        vma = 0;
+    }
+    if(vma && free_head && free_tail){
+        fileclose(vma->filp);
+        list_del(&vma->vma_list);
+        vma_free(vma);
+        return 0;
+    }else if(vma && free_head){
+        vma->off += length;
+        vma->vaddr_start += length;
+        return 0;
+    }else if(vma && free_tail){
+        vma->vaddr_end -= length;
+        return 0;
+    }
+
+    return -1;
 }

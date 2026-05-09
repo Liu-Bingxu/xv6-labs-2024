@@ -52,6 +52,10 @@ static inline void list_del(struct list *node){
 
 // change head1 to head2
 static inline void list_chg_head(struct list *head1, struct list *head2){
+    if(list_empty(head1)){
+        init_list(head2);
+        return;
+    }
     *head2 = *head1;
     head1->next->prev = head2;
     head1->prev->next = head2;
